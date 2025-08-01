@@ -7,5 +7,11 @@ task:
 aggregate_metric_list:
   - metric: acc
     weight_by_size: True
+  - metric: acc_norm
+    weight_by_size: True
+  - metric: loglikelihood
+    weight_by_size: True
+  - metric: loglikelihood_norm_by_token_len
+    weight_by_size: True
 metadata:
   version: 2

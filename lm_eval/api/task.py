@@ -113,9 +113,6 @@ class TaskConfig(dict):
                 )
 
             if "until" not in self.generation_kwargs:
-                eval_logger.warning(
-                    f"{self.task}: No `until` specified in `generation_kwargs`! Defaulting to the fewshot_delimiter={repr(self.fewshot_delimiter)}"
-                )
                 self.generation_kwargs["until"] = [self.fewshot_delimiter]
         else:
             if self.output_type == "generate_until":
@@ -127,11 +124,7 @@ class TaskConfig(dict):
                         else [self.fewshot_delimiter]
                     ),
                     "do_sample": False,
-                    "temperature": 0,
                 }
-                eval_logger.warning(
-                    f"{self.task}: No `generation_kwargs` specified in task config, defaulting to {self.generation_kwargs}"
-                )
 
     def __getitem__(self, item):
         return getattr(self, item)
@@ -458,13 +451,11 @@ class Task(abc.ABC):
             # sample fewshot context #TODO: need to offset doc_id by rank now!
             fewshot_ctx = self.fewshot_context(
                 doc,
-                num_fewshot=0
-                if self.config.num_fewshot is None
-                else self.config.num_fewshot,
-                system_instruction=system_instruction,
-                apply_chat_template=apply_chat_template,
-                fewshot_as_multiturn=fewshot_as_multiturn,
-                chat_template=chat_template,
+                0 if self.config.num_fewshot is None else self.config.num_fewshot,
+                system_instruction,
+                apply_chat_template,
+                fewshot_as_multiturn,
+                chat_template,
                 gen_prefix=self.doc_to_prefix(doc),
             )
 
@@ -499,7 +490,7 @@ class Task(abc.ABC):
 
         if cache_requests and (not cached_instances or rewrite_requests_cache):
             save_to_cache(file_name=cache_key, obj=instances)
-
+    
     @abc.abstractmethod
     def construct_requests(self, doc, ctx, **kwargs):
         """Uses RequestFactory to construct Requests and returns an iterable of
@@ -937,17 +928,11 @@ class ConfigurableTask(Task):
                 num_choice = len(test_choice)
 
             if isinstance(test_text, int):
-                eval_logger.debug(
-                    "doc_to_text returned an int. Assuming multiple inputs."
-                )
                 self.multiple_input = num_choice
         else:
             test_choice = None
 
         if isinstance(test_target, list):
-            eval_logger.debug(
-                "doc_to_target returned a list. Assuming multiple targets."
-            )
             self.multiple_target = len(test_target)
         else:
             if (isinstance(test_target, int)) and (test_choice is not None):
@@ -981,10 +966,6 @@ class ConfigurableTask(Task):
     def download(
         self, dataset_kwargs: Optional[Dict[str, Any]] = None, **kwargs
     ) -> None:
-        from packaging.version import parse as vparse
-
-        if dataset_kwargs and vparse(datasets.__version__) >= vparse("4.0.0"):
-            dataset_kwargs.pop("trust_remote_code", None)
         if isinstance(self.config.custom_dataset, Callable):
             eval_logger.warning(
                 f"{self.config.task}: Custom kwargs can be passed to `--metadata` in console (as json string) or to the TaskManager."
@@ -1487,10 +1468,7 @@ class ConfigurableTask(Task):
                 # here mutual info refers to calculating
                 # log(P(choice|ctx) / P(choice)) = log(P(choice|ctx)) - log(P(choice))
                 # in other words normalizing by subtracting the unconditional logprob of each choice.
-                # TODO: should these be strided? will have to modify the processing in process_results if so
-                aux_arguments = [
-                    ("", f"{target_delimiter}{choice}") for choice in choices
-                ]
+                aux_arguments = [("", f"{choice}") for choice in choices]
 
                 arguments.extend(aux_arguments)
 
@@ -1531,7 +1509,6 @@ class ConfigurableTask(Task):
                 )
                 for i, arg in enumerate(arguments)
             ]
-
             return request_list
 
         return Instance(
@@ -1577,7 +1554,7 @@ class ConfigurableTask(Task):
                 ),
             }
         elif self.OUTPUT_TYPE == "multiple_choice":
-            lls, is_greedy = zip(*results)
+            lls, lls_token_mean, is_greedy = zip(*results) # lls: log likelihood summed over all completion tokens
 
             # retrieve choices in List[str] form, to compute choice lengths, etc.
             choices = self.doc_to_choice(doc)
@@ -1589,12 +1566,11 @@ class ConfigurableTask(Task):
             ):
                 # then we are doing mutual info.
                 # this stores the "dryrun" / unconditional answer loglikelihoods
-                # as we extend the args list with unconditional ("", continuation) pairs
-                lls_unconditional = lls[len(choices) :]
+                lls_unconditional = lls[1::2]
                 if len(lls_unconditional) != len(choices):
                     raise ValueError
                 # and this stores our "regular" conditional loglikelihoods
-                lls = lls[: len(choices)]
+                lls = lls[::2]
 
             pred = np.argmax(lls)
             pred_norm = np.argmax(lls / completion_len)
@@ -1649,6 +1625,10 @@ class ConfigurableTask(Task):
                     if "brier_score" in use_metric
                     else {}
                 ),
+                **({"loglikelihood": lls[gold]}), 
+                **({"loglikelihood_norm_by_token_len": lls_token_mean[gold]}),
+                # **({"completion_token_len": [round(x / y) for x, y in zip(lls, lls_token_mean)]}),
+                # **({"completion_char_len": completion_len.tolist()}),
             }
 
             if "acc_mutual_info" in use_metric:
@@ -1786,7 +1766,6 @@ class MultipleChoiceTask(Task):
             res[0] for res in results
         ]  # only retain loglikelihoods, discard is_greedy TODO: do we need is_greedy anywhere?
         gold = doc["gold"]
-
         acc = 1.0 if np.argmax(results) == gold else 0.0
         completion_len = np.array([float(len(i)) for i in doc["choices"]])
         acc_norm = 1.0 if np.argmax(results / completion_len) == gold else 0.0
